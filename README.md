@@ -39,6 +39,57 @@
 
 </br>
 
+# 🚀 Browser-Use (Antigravity & Web UI Edition)
+
+> **Enhanced by [Asadullah404](https://github.com/Asadullah404) with Native Google Antigravity Integration & Full Interactive Web UI.**
+
+### 🌟 Key Enhancements in this Fork:
+- **Google Antigravity Dual-Backend (`ChatAntigravity`)**:
+  - **API Key Mode**: Connects directly using `ANTIGRAVITY_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` for high-speed API execution.
+  - **Local CLI Fallback Mode**: If no API key is provided, it automatically detects your installed Antigravity CLI (`agy` / `agy.exe`) and runs non-interactively without needing any API key!
+  - **Seamless Agent Default**: `Agent(task=...)` automatically defaults to Antigravity when available.
+- **Interactive Web UI Control Center (`web_ui.py`)**:
+  - Run browser automation with zero coding! Launch `uv run python web_ui.py` and access `http://localhost:8000`.
+  - Type tasks in plain English, select models, toggle browser visibility, and view real-time extracted results.
+- **Interactive Terminal UI (`examples/ui/command_line.py`)**:
+  - Run `uv run python examples/ui/command_line.py` to enter tasks interactively in your terminal.
+- **Comprehensive Unit Testing**:
+  - Verified with 100% passing tests in `tests/ci/models/test_llm_antigravity.py`.
+
+---
+
+## ⚡ Quick Start: Web UI (No Coding Required)
+
+Start the local Web UI server:
+```powershell
+uv run python web_ui.py
+```
+Open **`http://localhost:8000`** in your browser, enter your task description, and click **🚀 Run Browser Agent**!
+
+---
+
+## ⚡ Quick Start: Python Script with Antigravity
+
+```python
+import asyncio
+from browser_use import Agent, Browser, ChatAntigravity
+
+async def main():
+    # Uses API key if present, otherwise uses local 'agy' CLI automatically
+    agent = Agent(
+        task="Go to https://news.ycombinator.com and extract the top story",
+        llm=ChatAntigravity(),
+        browser=Browser(headless=False),
+    )
+    history = await agent.run()
+    print("Result:", history.final_result())
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
 # What can Browser Use do?
 
 Browser Use lets an AI agent use a web browser the same way humans do — it opens pages, clicks buttons, types, and fills in forms. You describe the task, and it completes it. For example, you can have it:
