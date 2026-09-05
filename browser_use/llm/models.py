@@ -115,6 +115,10 @@ def get_llm_by_name(model_name: str):
 		base_url = os.getenv('MISTRAL_BASE_URL', 'https://api.mistral.ai/v1')
 		return ChatMistral(model=mistral_aliases[model_name], api_key=api_key, base_url=base_url)
 
+	if model_name.lower() in ('antigravity', 'agy'):
+		from browser_use.llm.antigravity.chat import ChatAntigravity
+		return ChatAntigravity()
+
 	# Parse model name
 	parts = model_name.split('_', 1)
 	if len(parts) < 2:
@@ -178,6 +182,12 @@ def get_llm_by_name(model_name: str):
 	elif provider == 'google':
 		api_key = os.getenv('GOOGLE_API_KEY')
 		return ChatGoogle(model=model, api_key=api_key)
+
+	# Antigravity Models
+	elif provider == 'antigravity':
+		from browser_use.llm.antigravity.chat import ChatAntigravity
+
+		return ChatAntigravity(model=model)
 
 	# Anthropic Models
 	elif provider == 'anthropic':

@@ -30,7 +30,15 @@ from browser_use.tools.service import Tools
 
 
 def get_llm(provider: str):
-	if provider == 'anthropic':
+	if provider == 'antigravity':
+		from browser_use import ChatAntigravity
+
+		return ChatAntigravity()
+	elif provider == 'browser-use':
+		from browser_use import ChatBrowserUse
+
+		return ChatBrowserUse()
+	elif provider == 'anthropic':
 		from browser_use.llm import ChatAnthropic
 
 		api_key = os.getenv('ANTHROPIC_API_KEY')
@@ -55,14 +63,14 @@ def parse_arguments():
 	"""Parse command-line arguments."""
 	parser = argparse.ArgumentParser(description='Automate browser tasks using an LLM agent.')
 	parser.add_argument(
-		'--query', type=str, help='The query to process', default='go to reddit and search for posts about browser-use'
+		'--query', type=str, help='The query to process', default=None
 	)
 	parser.add_argument(
 		'--provider',
 		type=str,
-		choices=['openai', 'anthropic'],
-		default='openai',
-		help='The model provider to use (default: openai)',
+		choices=['antigravity', 'browser-use', 'openai', 'anthropic'],
+		default='antigravity',
+		help='The model provider to use (default: antigravity)',
 	)
 	return parser.parse_args()
 
@@ -86,11 +94,18 @@ def initialize_agent(query: str, provider: str):
 async def main():
 	"""Main async function to run the agent."""
 	args = parse_arguments()
-	agent, browser_session = initialize_agent(args.query, args.provider)
+	query = args.query
+	if not query:
+		query = input('\n🤖 Enter the task for the browser agent: ').strip()
+		if not query:
+			print('No task provided. Exiting.')
+			return
+
+	agent, browser_session = initialize_agent(query, args.provider)
 
 	await agent.run(max_steps=25)
 
-	input('Press Enter to close the browser...')
+	input('\nPress Enter to close the browser...')
 	await browser_session.kill()
 
 

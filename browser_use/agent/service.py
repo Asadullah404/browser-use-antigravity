@@ -3,6 +3,7 @@ import gc
 import inspect
 import json
 import logging
+import os
 import re
 import tempfile
 import time
@@ -229,10 +230,22 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				llm = get_llm_by_name(default_llm_name)
 			else:
-				# No default LLM specified, use the original default
-				from browser_use import ChatBrowserUse
+				antigravity_key = (
+					os.environ.get('ANTIGRAVITY_API_KEY')
+					or os.environ.get('GEMINI_API_KEY')
+					or os.environ.get('GOOGLE_API_KEY')
+				)
+				from browser_use.llm.antigravity.chat import find_antigravity_cli
 
-				llm = ChatBrowserUse()
+				if antigravity_key or (not os.environ.get('BROWSER_USE_API_KEY') and find_antigravity_cli()):
+					from browser_use.llm.antigravity.chat import ChatAntigravity
+
+					llm = ChatAntigravity()
+				else:
+					# No default LLM specified, use the original default
+					from browser_use import ChatBrowserUse
+
+					llm = ChatBrowserUse()
 
 		# set flashmode = True if llm is ChatBrowserUse
 		if llm.provider == 'browser-use':
