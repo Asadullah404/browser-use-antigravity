@@ -152,9 +152,7 @@ class ChatAntigravity(BaseChatModel):
 	) -> ChatInvokeCompletion[str]: ...
 
 	@overload
-	async def ainvoke(
-		self, messages: list[BaseMessage], output_format: type[T], **kwargs: Any
-	) -> ChatInvokeCompletion[T]: ...
+	async def ainvoke(self, messages: list[BaseMessage], output_format: type[T], **kwargs: Any) -> ChatInvokeCompletion[T]: ...
 
 	async def ainvoke(
 		self, messages: list[BaseMessage], output_format: type[T] | None = None, **kwargs: Any
@@ -167,16 +165,30 @@ class ChatAntigravity(BaseChatModel):
 
 		base_prompt = self._serialize_messages_for_cli(messages)
 
+		# Guard against Windows CreateProcess command line limit (32,767 characters)
+		MAX_CLI_PROMPT_CHARS = 24000
+
 		if output_format is None:
-			prompt = base_prompt
+			instruction_suffix = ''
 		else:
 			schema_str = json.dumps(output_format.model_json_schema(), indent=2)
-			prompt = (
-				f'{base_prompt}\n\n'
-				f'CRITICAL INSTRUCTION: You must respond ONLY with a single valid JSON object '
+			instruction_suffix = (
+				f'\n\nCRITICAL INSTRUCTION: You must respond ONLY with a single valid JSON object '
 				f'strictly matching the following JSON Schema:\n{schema_str}\n'
 				f'Do NOT include any explanations, markdown code blocks, or extra text before or after the JSON.'
 			)
+
+		available_base_len = MAX_CLI_PROMPT_CHARS - len(instruction_suffix)
+		if len(base_prompt) > available_base_len:
+			head_len = int(available_base_len * 0.4)
+			tail_len = available_base_len - head_len - 100
+			base_prompt = (
+				base_prompt[:head_len]
+				+ '\n\n...[Content truncated to fit Windows CLI command length limit]...\n\n'
+				+ base_prompt[-tail_len:]
+			)
+
+		prompt = base_prompt + instruction_suffix
 
 		cmd = [
 			self.cli_path,
@@ -233,4 +245,3 @@ class ChatAntigravity(BaseChatModel):
 				message=f'Failed to execute Antigravity CLI: {e}',
 				model=self.name,
 			) from e
-
