@@ -4,6 +4,8 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar, overload
@@ -64,7 +66,30 @@ def _extract_json_string(text: str) -> str:
 	end_idx = text.rfind('}')
 	if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
 		return text[start_idx : end_idx + 1]
-	return text
+
+
+def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 24000) -> list[str]:
+	"""Ensure command line length does not exceed Windows CreateProcess limit (32,767 chars)."""
+	cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
+	if sys.platform != 'win32' or len(subprocess.list2cmdline(cmd)) <= max_cmd_len:
+		return cmd
+
+	# Progressively trim the middle of base_prompt to preserve instructions and latest page elements
+	while len(subprocess.list2cmdline(cmd)) > max_cmd_len and len(base_prompt) > 300:
+		excess = len(subprocess.list2cmdline(cmd)) - max_cmd_len
+		remove_count = max(excess + 100, 500)
+		midpoint = len(base_prompt) // 2
+		half_remove = remove_count // 2
+		left = max(100, midpoint - half_remove)
+		right = min(len(base_prompt) - 100, midpoint + half_remove)
+		base_prompt = (
+			base_prompt[:left]
+			+ '\n\n...[Page DOM content truncated to fit Windows CLI command length limit]...\n\n'
+			+ base_prompt[right:]
+		)
+		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
+
+	return cmd
 
 
 @dataclass
@@ -165,9 +190,6 @@ class ChatAntigravity(BaseChatModel):
 
 		base_prompt = self._serialize_messages_for_cli(messages)
 
-		# Guard against Windows CreateProcess command line limit (32,767 characters)
-		MAX_CLI_PROMPT_CHARS = 24000
-
 		if output_format is None:
 			instruction_suffix = ''
 		else:
@@ -178,24 +200,7 @@ class ChatAntigravity(BaseChatModel):
 				f'Do NOT include any explanations, markdown code blocks, or extra text before or after the JSON.'
 			)
 
-		available_base_len = MAX_CLI_PROMPT_CHARS - len(instruction_suffix)
-		if len(base_prompt) > available_base_len:
-			head_len = int(available_base_len * 0.4)
-			tail_len = available_base_len - head_len - 100
-			base_prompt = (
-				base_prompt[:head_len]
-				+ '\n\n...[Content truncated to fit Windows CLI command length limit]...\n\n'
-				+ base_prompt[-tail_len:]
-			)
-
-		prompt = base_prompt + instruction_suffix
-
-		cmd = [
-			self.cli_path,
-			'--disable-slash-commands',
-			'-p',
-			prompt,
-		]
+		cmd = _fit_cli_prompt(self.cli_path, base_prompt, instruction_suffix, max_cmd_len=24000)
 
 		try:
 			proc = await asyncio.create_subprocess_exec(
