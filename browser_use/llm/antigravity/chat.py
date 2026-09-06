@@ -70,7 +70,7 @@ def _extract_json_string(text: str) -> str:
 		return text[start_idx : end_idx + 1]
 
 
-def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 16000) -> list[str]:
+def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 12000) -> list[str]:
 	"""Ensure command line length does not exceed Windows CreateProcess limit (32,767 chars)."""
 	cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 	if sys.platform != 'win32':
@@ -196,8 +196,12 @@ class ChatAntigravity(BaseChatModel):
 	async def ainvoke(
 		self, messages: list[BaseMessage], output_format: type[T] | None = None, **kwargs: Any
 	) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
+		t0 = time.time()
 		if self._backend == 'api' and self._google_chat is not None:
-			return await self._google_chat.ainvoke(messages=messages, output_format=output_format, **kwargs)
+			logger.info(f'🧠 [ChatAntigravity API] Querying Gemini {self.model}...')
+			res = await self._google_chat.ainvoke(messages=messages, output_format=output_format, **kwargs)
+			logger.info(f'⚡ [ChatAntigravity API] Gemini response received in {time.time() - t0:.1f}s')
+			return res
 
 		# CLI backend execution
 		assert self.cli_path is not None, 'Antigravity CLI path is not set'
@@ -217,7 +221,7 @@ class ChatAntigravity(BaseChatModel):
 		# Try executing with fitted prompt, and if Windows WinError 206 still occurs, retry with smaller limits
 		last_os_err = None
 		proc = None
-		for attempt_max_len in [16000, 10000, 5000]:
+		for attempt_max_len in [12000, 8000, 4000]:
 			cmd = _fit_cli_prompt(self.cli_path, base_prompt, instruction_suffix, max_cmd_len=attempt_max_len)
 			try:
 				proc = await asyncio.create_subprocess_exec(
@@ -243,11 +247,31 @@ class ChatAntigravity(BaseChatModel):
 				model=self.name,
 			)
 
+		logger.info(f'🧠 [ChatAntigravity CLI] Querying Antigravity CLI (prompt length: {len(base_prompt)} chars)...')
+
+		# Heartbeat logger while waiting for CLI
+		async def _heartbeat():
+			elapsed = 0
+			try:
+				while True:
+					await asyncio.sleep(5)
+					elapsed += 5
+					logger.info(f'⏳ [ChatAntigravity CLI] Waiting for LLM response ({elapsed}s elapsed)...')
+			except asyncio.CancelledError:
+				pass
+
+		heartbeat_task = asyncio.create_task(_heartbeat())
+
 		try:
-			stdout_bytes, stderr_bytes = await asyncio.wait_for(
-				proc.communicate(),
-				timeout=float(self.timeout),
-			)
+			try:
+				stdout_bytes, stderr_bytes = await asyncio.wait_for(
+					proc.communicate(),
+					timeout=float(self.timeout),
+				)
+			finally:
+				heartbeat_task.cancel()
+
+			logger.info(f'⚡ [ChatAntigravity CLI] LLM response received in {time.time() - t0:.1f}s')
 
 			stdout = stdout_bytes.decode('utf-8', errors='replace').strip()
 			stderr = stderr_bytes.decode('utf-8', errors='replace').strip()
