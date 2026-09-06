@@ -1324,6 +1324,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		await self._demo_mode_log(f'Step error: {error_msg}', 'error', {'step': self.state.n_steps})
 		self.state.last_result = [ActionResult(error=error_msg)]
+
+		if not is_final_failure and self.state.consecutive_failures > 0:
+			delay = min(2 * self.state.consecutive_failures, 8)
+			self.logger.info(f'⏳ Waiting {delay}s before retrying step (attempt {self.state.consecutive_failures + 1}/{max_total_failures})...')
+			await asyncio.sleep(delay)
+
 		return None
 
 	def _is_connection_like_error(self, error: Exception) -> bool:

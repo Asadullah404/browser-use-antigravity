@@ -68,25 +68,37 @@ def _extract_json_string(text: str) -> str:
 		return text[start_idx : end_idx + 1]
 
 
-def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 24000) -> list[str]:
+def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 16000) -> list[str]:
 	"""Ensure command line length does not exceed Windows CreateProcess limit (32,767 chars)."""
 	cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
-	if sys.platform != 'win32' or len(subprocess.list2cmdline(cmd)) <= max_cmd_len:
+	if sys.platform != 'win32':
 		return cmd
 
-	# Progressively trim the middle of base_prompt to preserve instructions and latest page elements
-	while len(subprocess.list2cmdline(cmd)) > max_cmd_len and len(base_prompt) > 300:
+	if len(subprocess.list2cmdline(cmd)) <= max_cmd_len:
+		return cmd
+
+	# Progressively trim base_prompt until subprocess.list2cmdline(cmd) <= max_cmd_len
+	while len(subprocess.list2cmdline(cmd)) > max_cmd_len and len(base_prompt) > 100:
 		excess = len(subprocess.list2cmdline(cmd)) - max_cmd_len
-		remove_count = max(excess + 100, 500)
+		remove_count = max(excess + 200, int(len(base_prompt) * 0.25))
 		midpoint = len(base_prompt) // 2
 		half_remove = remove_count // 2
-		left = max(100, midpoint - half_remove)
-		right = min(len(base_prompt) - 100, midpoint + half_remove)
-		base_prompt = (
-			base_prompt[:left]
-			+ '\n\n...[Page DOM content truncated to fit Windows CLI command length limit]...\n\n'
-			+ base_prompt[right:]
-		)
+		left = max(50, midpoint - half_remove)
+		right = min(len(base_prompt) - 50, midpoint + half_remove)
+		if right <= left:
+			base_prompt = base_prompt[:max(50, len(base_prompt) - remove_count)]
+		else:
+			base_prompt = (
+				base_prompt[:left]
+				+ '\n\n...[Page DOM content truncated for CLI command length limit]...\n\n'
+				+ base_prompt[right:]
+			)
+		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
+
+	# If base_prompt is already minimal but cmd still exceeds max_cmd_len (e.g. huge instruction_suffix)
+	if len(subprocess.list2cmdline(cmd)) > max_cmd_len:
+		suffix_limit = max(100, max_cmd_len - len(subprocess.list2cmdline([cli_path, '--disable-slash-commands', '-p', ''])) - 200)
+		instruction_suffix = instruction_suffix[:suffix_limit] + '\n...[truncated]'
 		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
 	return cmd
@@ -200,16 +212,36 @@ class ChatAntigravity(BaseChatModel):
 				f'Do NOT include any explanations, markdown code blocks, or extra text before or after the JSON.'
 			)
 
-		cmd = _fit_cli_prompt(self.cli_path, base_prompt, instruction_suffix, max_cmd_len=24000)
+		# Try executing with fitted prompt, and if Windows WinError 206 still occurs, retry with smaller limits
+		last_os_err = None
+		proc = None
+		for attempt_max_len in [16000, 10000, 5000]:
+			cmd = _fit_cli_prompt(self.cli_path, base_prompt, instruction_suffix, max_cmd_len=attempt_max_len)
+			try:
+				proc = await asyncio.create_subprocess_exec(
+					*cmd,
+					stdin=asyncio.subprocess.DEVNULL,
+					stdout=asyncio.subprocess.PIPE,
+					stderr=asyncio.subprocess.PIPE,
+				)
+				break
+			except OSError as e:
+				last_os_err = e
+				if getattr(e, 'winerror', None) == 206 or '206' in str(e) or 'filename or extension is too long' in str(e).lower():
+					logger.warning(f'Windows command line length exceeded with limit {attempt_max_len}, reducing prompt size...')
+					continue
+				raise ModelProviderError(
+					message=f'Failed to execute Antigravity CLI: {e}',
+					model=self.name,
+				) from e
 
-		try:
-			proc = await asyncio.create_subprocess_exec(
-				*cmd,
-				stdin=asyncio.subprocess.DEVNULL,
-				stdout=asyncio.subprocess.PIPE,
-				stderr=asyncio.subprocess.PIPE,
+		if proc is None:
+			raise ModelProviderError(
+				message=f'Failed to execute Antigravity CLI due to Windows command line limit: {last_os_err}',
+				model=self.name,
 			)
 
+		try:
 			stdout_bytes, stderr_bytes = await asyncio.wait_for(
 				proc.communicate(),
 				timeout=float(self.timeout),
@@ -219,6 +251,18 @@ class ChatAntigravity(BaseChatModel):
 			stderr = stderr_bytes.decode('utf-8', errors='replace').strip()
 
 			if proc.returncode != 0:
+				err_combined = f'{stderr} {stdout}'.strip()
+				if 'Eligibility check failed' in err_combined or 'Authentication required' in err_combined:
+					auth_help = (
+						'\n\n[Antigravity Auth Note]: The Antigravity CLI session needs re-authentication. '
+						'Run `agy` in your terminal to log in, OR add `GEMINI_API_KEY=your_key` to your .env file '
+						'to use the high-performance direct API mode.'
+					)
+					raise ModelProviderError(
+						message=f'Antigravity CLI failed with code {proc.returncode}: {err_combined}{auth_help}',
+						model=self.name,
+					)
+
 				raise ModelProviderError(
 					message=f'Antigravity CLI failed with code {proc.returncode}: {stderr or stdout}',
 					model=self.name,

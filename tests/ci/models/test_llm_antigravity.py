@@ -54,3 +54,22 @@ def test_get_llm_by_name_antigravity():
 	model_agy = get_llm_by_name('agy')
 	assert isinstance(model_agy, ChatAntigravity)
 
+
+def test_fit_cli_prompt_huge_input():
+	"""Test that _fit_cli_prompt guarantees Windows command-line stays under safe limits."""
+	import subprocess
+	import sys
+	from browser_use.llm.antigravity.chat import _fit_cli_prompt
+
+	huge_prompt = '{"action": "click", "element": "<button onclick=\\"test()\\">Hello World</button>"}\n' * 2000
+	suffix = '\nCRITICAL INSTRUCTION: Respond with valid JSON only matching schema'
+	cmd = _fit_cli_prompt('C:\\test\\agy.exe', huge_prompt, suffix, max_cmd_len=16000)
+
+	if sys.platform == 'win32':
+		cmd_str = subprocess.list2cmdline(cmd)
+		assert len(cmd_str) <= 16000
+		assert cmd[0] == 'C:\\test\\agy.exe'
+		assert cmd[1] == '--disable-slash-commands'
+		assert cmd[2] == '-p'
+
+
