@@ -42,9 +42,11 @@ def find_antigravity_cli() -> str | None:
 
 	# 3. Known default locations
 	candidates = [
+		Path.home() / 'AppData' / 'Local' / 'agy' / 'bin' / 'agy.exe',
+		Path.home() / 'AppData' / 'Local' / 'agy' / 'bin' / 'agy.EXE',
+		Path.home() / 'AppData' / 'Local' / 'agy' / 'agy.exe',
 		Path.home() / '.gemini' / 'bin' / 'agy.exe',
 		Path.home() / '.gemini' / 'bin' / 'agy',
-		Path.home() / 'AppData' / 'Local' / 'agy' / 'agy.exe',
 		Path('/usr/local/bin/agy'),
 		Path('/usr/bin/agy'),
 	]

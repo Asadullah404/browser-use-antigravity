@@ -20,6 +20,7 @@ app = FastAPI(title="Browser Use Web UI")
 class TaskRequest(BaseModel):
 	task: str
 	model: Literal['antigravity', 'browser-use', 'google', 'openai'] = 'antigravity'
+	api_key: str | None = None
 	headless: bool = False
 	max_steps: int = 30
 
@@ -231,6 +232,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
             </div>
 
+            <div class="form-group">
+                <label for="api-key">API Key <span style="font-weight: normal; color: var(--text-muted);">(Optional - paste Gemini / Browser Use / OpenAI key)</span></label>
+                <input type="password" id="api-key" placeholder="AIzaSy... (leave blank to use CLI or .env file)">
+            </div>
+
             <button id="run-btn" class="btn" onclick="startTask()">
                 <div class="spinner" id="spinner"></div>
                 <span id="btn-text">🚀 Run Browser Agent</span>
@@ -255,6 +261,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
 
             const model = document.getElementById('model').value;
+            const apiKey = document.getElementById('api-key').value.trim() || undefined;
             const headless = document.getElementById('headless').checked;
 
             const runBtn = document.getElementById('run-btn');
@@ -276,7 +283,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const response = await fetch('/api/run', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ task, model, headless, max_steps: 25 })
+                    body: JSON.stringify({ task, model, api_key: apiKey, headless, max_steps: 25 })
                 });
 
                 const data = await response.json();
@@ -314,15 +321,15 @@ async def run_task(req: TaskRequest):
 	try:
 		# 1. Select LLM
 		if req.model == 'antigravity':
-			llm = ChatAntigravity()
+			llm = ChatAntigravity(api_key=req.api_key)
 		elif req.model == 'browser-use':
-			llm = ChatBrowserUse()
+			llm = ChatBrowserUse(api_key=req.api_key) if req.api_key else ChatBrowserUse()
 		elif req.model == 'google':
-			llm = ChatGoogle(model='gemini-2.5-flash')
+			llm = ChatGoogle(model='gemini-2.5-flash', api_key=req.api_key)
 		elif req.model == 'openai':
-			llm = ChatOpenAI(model='gpt-4.1-mini')
+			llm = ChatOpenAI(model='gpt-4.1-mini', api_key=req.api_key) if req.api_key else ChatOpenAI(model='gpt-4.1-mini')
 		else:
-			llm = ChatAntigravity()
+			llm = ChatAntigravity(api_key=req.api_key)
 
 		# 2. Browser instance
 		browser = Browser(headless=req.headless)
@@ -336,6 +343,18 @@ async def run_task(req: TaskRequest):
 
 		history = await agent.run(max_steps=req.max_steps)
 		final_res = history.final_result()
+
+		if not history.is_successful():
+			err_list = [e for e in history.errors() if e]
+			if err_list:
+				last_err = err_list[-1]
+			else:
+				last_action = history.last_action()
+				last_err = getattr(last_action, 'error', None) if last_action else None
+			return {
+				"success": False,
+				"error": last_err or "Agent was unable to complete the task within max steps. Check terminal logs for details."
+			}
 
 		return {"success": True, "result": final_res or "Task completed successfully."}
 	except Exception as e:
