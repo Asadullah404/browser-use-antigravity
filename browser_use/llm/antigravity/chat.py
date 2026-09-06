@@ -71,38 +71,35 @@ def _extract_json_string(text: str) -> str:
 		return text[start_idx : end_idx + 1]
 
 
-def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 12000) -> list[str]:
+def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 28000) -> list[str]:
 	"""Ensure command line length does not exceed Windows CreateProcess limit (32,767 chars)."""
 	if sys.platform != 'win32':
 		return [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
-	# Calculate overhead of the command and instruction suffix
-	overhead = len(subprocess.list2cmdline([cli_path, '--disable-slash-commands', '-p', instruction_suffix])) + 300
-	available_chars = max(500, max_cmd_len - overhead)
+	# Reserve space for CLI path, flags, instruction_suffix (JSON schema), and safety margin
+	overhead = len(subprocess.list2cmdline([cli_path, '--disable-slash-commands', '-p', instruction_suffix])) + 500
+	available_chars = max(1000, max_cmd_len - overhead)
 
-	# Direct O(1) slice: keep first 30% and last 70% of available chars
+	# If base_prompt exceeds available characters, trim the middle (preserving system prompt and user task at end)
 	if len(base_prompt) > available_chars:
-		half_left = int(available_chars * 0.30)
-		half_right = int(available_chars * 0.70)
+		half_left = int(available_chars * 0.20)
+		half_right = int(available_chars * 0.80)
 		base_prompt = (
 			base_prompt[:half_left]
-			+ '\n\n...[Page DOM content truncated for CLI command length limit]...\n\n'
+			+ '\n\n...[Middle DOM elements truncated for CLI length limit]...\n\n'
 			+ base_prompt[-half_right:]
 		)
 
+	# Note: instruction_suffix contains the JSON schema and must NEVER be truncated
 	cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
-	# Safety check: if quote escaping still pushed it slightly over, fast geometric reduction (at most 4-5 steps)
+	# If quote escaping still pushed it slightly over, trim more from base_prompt only
 	cmd_len = len(subprocess.list2cmdline(cmd))
-	while cmd_len > max_cmd_len and len(base_prompt) > 100:
-		base_prompt = base_prompt[:max(100, int(len(base_prompt) * 0.70))]
+	while cmd_len > max_cmd_len and len(base_prompt) > 200:
+		excess = cmd_len - max_cmd_len + 200
+		base_prompt = base_prompt[:max(200, len(base_prompt) - excess)]
 		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 		cmd_len = len(subprocess.list2cmdline(cmd))
-
-	if cmd_len > max_cmd_len:
-		excess = cmd_len - max_cmd_len + 100
-		instruction_suffix = instruction_suffix[:max(100, len(instruction_suffix) - excess)]
-		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
 	return cmd
 
@@ -178,12 +175,26 @@ class ChatAntigravity(BaseChatModel):
 		parts: list[str] = []
 		for msg in messages:
 			role = msg.__class__.__name__.replace('Message', '').upper()
+			content = ''
 			if hasattr(msg, 'text') and msg.text:
-				parts.append(f'[{role}]:\n{msg.text}')
+				content = msg.text
 			elif hasattr(msg, 'content') and msg.content:
-				parts.append(f'[{role}]:\n{msg.content}')
+				content = str(msg.content)
 			else:
-				parts.append(f'[{role}]:\n{msg}')
+				content = str(msg)
+
+			# The default Browser-Use SystemMessage is ~24KB of instructions that bloats Windows CLI calls.
+			# For CLI mode, replace it with the concise official browser-use system prompt (~500 chars).
+			if role == 'SYSTEM' and len(content) > 3000:
+				content = (
+					"You are a browser automation agent operating in thinking mode. You automate browser tasks by outputting structured JSON actions.\n\n"
+					"<constraint_enforcement>\n"
+					"Instructions containing 'do NOT', 'never', 'avoid', 'skip', or 'only X' are hard constraints. Before each action, check: does this violate any constraint? If yes, stop and find an alternative.\n"
+					"</constraint_enforcement>\n\n"
+					"DATA GROUNDING: Only report data observed in browser state or tool outputs. Do NOT fabricate values."
+				)
+
+			parts.append(f'[{role}]:\n{content}')
 		return '\n\n'.join(parts)
 
 	@overload
@@ -222,7 +233,7 @@ class ChatAntigravity(BaseChatModel):
 		# Try executing with fitted prompt, and if Windows WinError 206 still occurs, retry with smaller limits
 		last_os_err = None
 		proc = None
-		for attempt_max_len in [12000, 8000, 4000]:
+		for attempt_max_len in [28000, 20000, 14000]:
 			cmd = _fit_cli_prompt(self.cli_path, base_prompt, instruction_suffix, max_cmd_len=attempt_max_len)
 			cmd_line_len = len(subprocess.list2cmdline(cmd))
 			try:
