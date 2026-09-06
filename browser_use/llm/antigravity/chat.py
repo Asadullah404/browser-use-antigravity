@@ -92,11 +92,16 @@ def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, ma
 
 	cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
-	# Safety check: if quote escaping still pushed it slightly over, clip the middle once more
+	# Safety check: if quote escaping still pushed it slightly over, fast geometric reduction (at most 4-5 steps)
 	cmd_len = len(subprocess.list2cmdline(cmd))
+	while cmd_len > max_cmd_len and len(base_prompt) > 100:
+		base_prompt = base_prompt[:max(100, int(len(base_prompt) * 0.70))]
+		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
+		cmd_len = len(subprocess.list2cmdline(cmd))
+
 	if cmd_len > max_cmd_len:
-		excess = cmd_len - max_cmd_len + 200
-		base_prompt = base_prompt[:max(100, len(base_prompt) - excess)]
+		excess = cmd_len - max_cmd_len + 100
+		instruction_suffix = instruction_suffix[:max(100, len(instruction_suffix) - excess)]
 		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
 	return cmd
@@ -219,6 +224,7 @@ class ChatAntigravity(BaseChatModel):
 		proc = None
 		for attempt_max_len in [12000, 8000, 4000]:
 			cmd = _fit_cli_prompt(self.cli_path, base_prompt, instruction_suffix, max_cmd_len=attempt_max_len)
+			cmd_line_len = len(subprocess.list2cmdline(cmd))
 			try:
 				proc = await asyncio.create_subprocess_exec(
 					*cmd,
@@ -226,11 +232,12 @@ class ChatAntigravity(BaseChatModel):
 					stdout=asyncio.subprocess.PIPE,
 					stderr=asyncio.subprocess.PIPE,
 				)
+				logger.info(f'🧠 [ChatAntigravity CLI] Subprocess spawned (command length: {cmd_line_len} chars)...')
 				break
 			except OSError as e:
 				last_os_err = e
 				if getattr(e, 'winerror', None) == 206 or '206' in str(e) or 'filename or extension is too long' in str(e).lower():
-					logger.warning(f'Windows command line length exceeded with limit {attempt_max_len}, reducing prompt size...')
+					logger.warning(f'Windows command line length ({cmd_line_len}) exceeded limit {attempt_max_len}, reducing prompt size...')
 					continue
 				raise ModelProviderError(
 					message=f'Failed to execute Antigravity CLI: {e}',

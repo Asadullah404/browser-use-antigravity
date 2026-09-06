@@ -357,6 +357,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="form-group">
                 <label for="api-key">API Key <span style="font-weight: normal; color: var(--text-muted);">(Optional - paste Gemini / Browser Use / OpenAI key)</span></label>
                 <input type="password" id="api-key" placeholder="AIzaSy... (leave blank to use CLI or .env file)">
+                <div style="font-size: 12px; color: var(--text-muted); margin-top: 5px;">
+                    ⚡ <strong>Recommended for speed:</strong> Paste a free <a href="https://aistudio.google.com/app/u/1/apikey" target="_blank" style="color: var(--primary);">Gemini API Key</a> for 2–3s per step with multimodal vision. Without a key, the agent uses the local <code>agy</code> CLI (30–60s/step).
+                </div>
             </div>
 
             <button id="run-btn" class="btn" onclick="startTask()">
