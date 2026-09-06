@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -175,13 +176,20 @@ class ChatAntigravity(BaseChatModel):
 		parts: list[str] = []
 		for msg in messages:
 			role = msg.__class__.__name__.replace('Message', '').upper()
-			content = ''
-			if hasattr(msg, 'text') and msg.text:
-				content = msg.text
-			elif hasattr(msg, 'content') and msg.content:
-				content = str(msg.content)
-			else:
-				content = str(msg)
+			# Always use the .text property which correctly handles both
+			# string content and list[ContentPartTextParam] content.
+			content = getattr(msg, 'text', '') or ''
+			if not content and hasattr(msg, 'content') and msg.content:
+				# Fallback: if .text is empty but content exists
+				if isinstance(msg.content, str):
+					content = msg.content
+				elif isinstance(msg.content, list):
+					content = '\n'.join(
+						part.text for part in msg.content
+						if hasattr(part, 'text') and hasattr(part, 'type') and part.type == 'text'
+					)
+				else:
+					content = str(msg.content)
 
 			# The default Browser-Use SystemMessage is ~24KB of instructions that bloats Windows CLI calls.
 			# For CLI mode, replace it with the concise official browser-use system prompt (~500 chars).
@@ -230,12 +238,26 @@ class ChatAntigravity(BaseChatModel):
 				f'Do NOT include any explanations, markdown code blocks, or extra text before or after the JSON.'
 			)
 
-		# Try executing with fitted prompt, and if Windows WinError 206 still occurs, retry with smaller limits
-		last_os_err = None
-		proc = None
-		for attempt_max_len in [28000, 20000, 14000]:
-			cmd = _fit_cli_prompt(self.cli_path, base_prompt, instruction_suffix, max_cmd_len=attempt_max_len)
-			cmd_line_len = len(subprocess.list2cmdline(cmd))
+		full_prompt = base_prompt + instruction_suffix
+
+		# Write prompt to a temp file and pass via `-p @<file>` to bypass
+		# Windows command line length limit (32,767 chars).  The prompt can
+		# easily exceed this when it contains serialized DOM content.
+		prompt_file_path = None
+		try:
+			with tempfile.NamedTemporaryFile(
+				mode='w', suffix='.txt', encoding='utf-8', delete=False,
+			) as pf:
+				pf.write(full_prompt)
+				prompt_file_path = pf.name
+
+			cmd = [self.cli_path, '--disable-slash-commands', '-p', f'@{prompt_file_path}']
+			cmd_line_len = len(subprocess.list2cmdline(cmd)) if sys.platform == 'win32' else len(' '.join(cmd))
+			logger.info(
+				f'🧠 [ChatAntigravity CLI] Prompt written to temp file '
+				f'({len(full_prompt)} chars, cmd length: {cmd_line_len} chars)'
+			)
+
 			try:
 				proc = await asyncio.create_subprocess_exec(
 					*cmd,
@@ -243,94 +265,91 @@ class ChatAntigravity(BaseChatModel):
 					stdout=asyncio.subprocess.PIPE,
 					stderr=asyncio.subprocess.PIPE,
 				)
-				logger.info(f'🧠 [ChatAntigravity CLI] Subprocess spawned (command length: {cmd_line_len} chars)...')
-				break
 			except OSError as e:
-				last_os_err = e
-				if getattr(e, 'winerror', None) == 206 or '206' in str(e) or 'filename or extension is too long' in str(e).lower():
-					logger.warning(f'Windows command line length ({cmd_line_len}) exceeded limit {attempt_max_len}, reducing prompt size...')
-					continue
 				raise ModelProviderError(
 					message=f'Failed to execute Antigravity CLI: {e}',
 					model=self.name,
 				) from e
 
-		if proc is None:
-			raise ModelProviderError(
-				message=f'Failed to execute Antigravity CLI due to Windows command line limit: {last_os_err}',
-				model=self.name,
-			)
+			logger.info(f'🧠 [ChatAntigravity CLI] Querying Antigravity CLI (prompt length: {len(base_prompt)} chars)...')
 
-		logger.info(f'🧠 [ChatAntigravity CLI] Querying Antigravity CLI (prompt length: {len(base_prompt)} chars)...')
+			# Heartbeat logger while waiting for CLI
+			async def _heartbeat():
+				elapsed = 0
+				try:
+					while True:
+						await asyncio.sleep(5)
+						elapsed += 5
+						logger.info(f'⏳ [ChatAntigravity CLI] Waiting for LLM response ({elapsed}s elapsed)...')
+				except asyncio.CancelledError:
+					pass
 
-		# Heartbeat logger while waiting for CLI
-		async def _heartbeat():
-			elapsed = 0
+			heartbeat_task = asyncio.create_task(_heartbeat())
+
 			try:
-				while True:
-					await asyncio.sleep(5)
-					elapsed += 5
-					logger.info(f'⏳ [ChatAntigravity CLI] Waiting for LLM response ({elapsed}s elapsed)...')
-			except asyncio.CancelledError:
-				pass
-
-		heartbeat_task = asyncio.create_task(_heartbeat())
-
-		try:
-			try:
-				stdout_bytes, stderr_bytes = await asyncio.wait_for(
-					proc.communicate(),
-					timeout=float(self.timeout),
-				)
-			finally:
-				heartbeat_task.cancel()
-
-			logger.info(f'⚡ [ChatAntigravity CLI] LLM response received in {time.time() - t0:.1f}s')
-
-			stdout = stdout_bytes.decode('utf-8', errors='replace').strip()
-			stderr = stderr_bytes.decode('utf-8', errors='replace').strip()
-
-			if proc.returncode != 0:
-				err_combined = f'{stderr} {stdout}'.strip()
-				if 'Eligibility check failed' in err_combined or 'Authentication required' in err_combined:
-					auth_help = (
-						'\n\n[Antigravity Auth Note]: The Antigravity CLI session needs re-authentication. '
-						'Run `agy` in your terminal to log in, OR add `GEMINI_API_KEY=your_key` to your .env file '
-						'to use the high-performance direct API mode.'
+				try:
+					stdout_bytes, stderr_bytes = await asyncio.wait_for(
+						proc.communicate(),
+						timeout=float(self.timeout),
 					)
+				finally:
+					heartbeat_task.cancel()
+
+				logger.info(f'⚡ [ChatAntigravity CLI] LLM response received in {time.time() - t0:.1f}s')
+
+				stdout = stdout_bytes.decode('utf-8', errors='replace').strip()
+				stderr = stderr_bytes.decode('utf-8', errors='replace').strip()
+
+				if proc.returncode != 0:
+					err_combined = f'{stderr} {stdout}'.strip()
+					if 'Eligibility check failed' in err_combined or 'Authentication required' in err_combined:
+						auth_help = (
+							'\n\n[Antigravity Auth Note]: The Antigravity CLI session needs re-authentication. '
+							'Run `agy` in your terminal to log in, OR add `GEMINI_API_KEY=your_key` to your .env file '
+							'to use the high-performance direct API mode.'
+						)
+						raise ModelProviderError(
+							message=f'Antigravity CLI failed with code {proc.returncode}: {err_combined}{auth_help}',
+							model=self.name,
+						)
+
 					raise ModelProviderError(
-						message=f'Antigravity CLI failed with code {proc.returncode}: {err_combined}{auth_help}',
+						message=f'Antigravity CLI failed with code {proc.returncode}: {stderr or stdout}',
 						model=self.name,
 					)
 
+				if output_format is None:
+					return ChatInvokeCompletion(completion=stdout, usage=None)
+
+				raw_json = _extract_json_string(stdout)
+				try:
+					parsed = output_format.model_validate_json(raw_json)
+				except ValidationError as e:
+					raise ModelProviderError(
+						message=f'Antigravity CLI returned invalid JSON for structured output schema: {e}\nRaw output: {stdout}',
+						model=self.name,
+					) from e
+
+				return ChatInvokeCompletion(completion=parsed, usage=None)
+
+			except TimeoutError as e:
 				raise ModelProviderError(
-					message=f'Antigravity CLI failed with code {proc.returncode}: {stderr or stdout}',
+					message=f'Antigravity CLI timed out after {self.timeout}s',
 					model=self.name,
-				)
-
-			if output_format is None:
-				return ChatInvokeCompletion(completion=stdout, usage=None)
-
-			raw_json = _extract_json_string(stdout)
-			try:
-				parsed = output_format.model_validate_json(raw_json)
-			except ValidationError as e:
+				) from e
+			except ModelProviderError:
+				raise
+			except Exception as e:
 				raise ModelProviderError(
-					message=f'Antigravity CLI returned invalid JSON for structured output schema: {e}\nRaw output: {stdout}',
+					message=f'Failed to execute Antigravity CLI: {e}',
 					model=self.name,
 				) from e
 
-			return ChatInvokeCompletion(completion=parsed, usage=None)
+		finally:
+			# Clean up the temp file
+			if prompt_file_path:
+				try:
+					os.unlink(prompt_file_path)
+				except OSError:
+					pass
 
-		except TimeoutError as e:
-			raise ModelProviderError(
-				message=f'Antigravity CLI timed out after {self.timeout}s',
-				model=self.name,
-			) from e
-		except ModelProviderError:
-			raise
-		except Exception as e:
-			raise ModelProviderError(
-				message=f'Failed to execute Antigravity CLI: {e}',
-				model=self.name,
-			) from e
