@@ -73,35 +73,30 @@ def _extract_json_string(text: str) -> str:
 
 def _fit_cli_prompt(cli_path: str, base_prompt: str, instruction_suffix: str, max_cmd_len: int = 12000) -> list[str]:
 	"""Ensure command line length does not exceed Windows CreateProcess limit (32,767 chars)."""
-	cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 	if sys.platform != 'win32':
-		return cmd
+		return [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
-	if len(subprocess.list2cmdline(cmd)) <= max_cmd_len:
-		return cmd
+	# Calculate overhead of the command and instruction suffix
+	overhead = len(subprocess.list2cmdline([cli_path, '--disable-slash-commands', '-p', instruction_suffix])) + 300
+	available_chars = max(500, max_cmd_len - overhead)
 
-	# Progressively trim base_prompt until subprocess.list2cmdline(cmd) <= max_cmd_len
-	while len(subprocess.list2cmdline(cmd)) > max_cmd_len and len(base_prompt) > 100:
-		excess = len(subprocess.list2cmdline(cmd)) - max_cmd_len
-		remove_count = max(excess + 200, int(len(base_prompt) * 0.25))
-		midpoint = len(base_prompt) // 2
-		half_remove = remove_count // 2
-		left = max(50, midpoint - half_remove)
-		right = min(len(base_prompt) - 50, midpoint + half_remove)
-		if right <= left:
-			base_prompt = base_prompt[:max(50, len(base_prompt) - remove_count)]
-		else:
-			base_prompt = (
-				base_prompt[:left]
-				+ '\n\n...[Page DOM content truncated for CLI command length limit]...\n\n'
-				+ base_prompt[right:]
-			)
-		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
+	# Direct O(1) slice: keep first 30% and last 70% of available chars
+	if len(base_prompt) > available_chars:
+		half_left = int(available_chars * 0.30)
+		half_right = int(available_chars * 0.70)
+		base_prompt = (
+			base_prompt[:half_left]
+			+ '\n\n...[Page DOM content truncated for CLI command length limit]...\n\n'
+			+ base_prompt[-half_right:]
+		)
 
-	# If base_prompt is already minimal but cmd still exceeds max_cmd_len (e.g. huge instruction_suffix)
-	if len(subprocess.list2cmdline(cmd)) > max_cmd_len:
-		suffix_limit = max(100, max_cmd_len - len(subprocess.list2cmdline([cli_path, '--disable-slash-commands', '-p', ''])) - 200)
-		instruction_suffix = instruction_suffix[:suffix_limit] + '\n...[truncated]'
+	cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
+
+	# Safety check: if quote escaping still pushed it slightly over, clip the middle once more
+	cmd_len = len(subprocess.list2cmdline(cmd))
+	if cmd_len > max_cmd_len:
+		excess = cmd_len - max_cmd_len + 200
+		base_prompt = base_prompt[:max(100, len(base_prompt) - excess)]
 		cmd = [cli_path, '--disable-slash-commands', '-p', base_prompt + instruction_suffix]
 
 	return cmd
